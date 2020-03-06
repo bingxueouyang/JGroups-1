@@ -10,6 +10,7 @@ import java.io.DataOutput;
 import java.util.*;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
@@ -27,9 +28,6 @@ public abstract class FailureDetection extends Protocol {
 
     @Property(description="Interval at which a HEARTBEAT is sent to the cluster")
     protected long                                   interval=8000;
-
-    @Property(description="Treat messages or message batches received from members as if they were heartbeats")
-    protected boolean                                msg_counts_as_heartbeat;
 
     @ManagedAttribute(description="Number of heartbeats sent")
     protected int                                    num_heartbeats_sent;
@@ -56,6 +54,8 @@ public abstract class FailureDetection extends Protocol {
 
     // task which checks for members exceeding timeout and suspects them
     @GuardedBy("lock") protected Future<?>           timeout_checker;
+
+    protected final AtomicBoolean                    mcast_sent=new AtomicBoolean(false);
 
 
     protected abstract Map<Address,?>     getTimestamps();
@@ -163,6 +163,11 @@ public abstract class FailureDetection extends Protocol {
         return down_prot.down(evt);
     }
 
+    public Object down(Message msg) {
+        if(msg.getDest() == null)
+            mcast_sent.compareAndSet(false, true);
+        return down_prot.down(msg);
+    }
 
     public Object up(Message msg) {
         Address sender=msg.getSrc();
@@ -173,23 +178,19 @@ public abstract class FailureDetection extends Protocol {
             unsuspect(sender);
             return null; // consume heartbeat message, do not pass to the layer above
         }
-        else if(msg_counts_as_heartbeat) {
-            update(sender, false, false); // update when data is received too ? maybe a bit costly
-            if(has_suspected_mbrs)
-                unsuspect(sender);
-        }
+        update(sender, false, false);
+        if(has_suspected_mbrs)
+            unsuspect(sender);
         return up_prot.up(msg); // pass up to the layer above us
     }
 
     public void up(MessageBatch batch) {
         int matched_msgs=batch.replaceIf(HAS_HEADER, null, true);
-        if(matched_msgs > 0 || msg_counts_as_heartbeat) {
-            update(batch.sender(), matched_msgs > 0, false);
-            if(matched_msgs > 0)
-                num_heartbeats_received+=matched_msgs;
-            if(has_suspected_mbrs)
-                unsuspect(batch.sender());
-        }
+        update(batch.sender(), matched_msgs > 0, false);
+        if(matched_msgs > 0)
+            num_heartbeats_received+=matched_msgs;
+        if(has_suspected_mbrs)
+            unsuspect(batch.sender());
         if(!batch.isEmpty())
             up_prot.up(batch);
     }
@@ -330,11 +331,15 @@ public abstract class FailureDetection extends Protocol {
     /** Class which periodically multicasts a HEARTBEAT message to the cluster */
     class HeartbeatSender implements Runnable {
         public void run() {
-            Message heartbeat=new EmptyMessage().setFlag(Message.Flag.INTERNAL).setFlag(Message.TransientFlag.DONT_LOOPBACK)
-              .putHeader(id, new HeartbeatHeader());
-            down_prot.down(heartbeat);
-            num_heartbeats_sent++;
-            log.trace("%s: sent heartbeat", local_addr);
+            if(mcast_sent.compareAndSet(true, false))
+                ; // suppress sending of heartbeat
+            else {
+                Message heartbeat=new EmptyMessage().setFlag(Message.Flag.INTERNAL).setFlag(Message.TransientFlag.DONT_LOOPBACK)
+                  .putHeader(id, new HeartbeatHeader());
+                down_prot.down(heartbeat);
+                num_heartbeats_sent++;
+                log.trace("%s: sent heartbeat", local_addr);
+            }
         }
 
         public String toString() {

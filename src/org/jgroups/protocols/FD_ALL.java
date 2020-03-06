@@ -66,9 +66,13 @@ public class FD_ALL extends FailureDetection {
     }
 
 
-    @Override protected void update(Address sender, boolean log_msg) {
-        if(sender != null && !sender.equals(local_addr))
-            timestamps.put(sender, getTimestamp());
+    @Override protected void update(Address sender, boolean log_msg, boolean skip_if_exists) {
+        if(sender != null && !sender.equals(local_addr)) {
+            if(skip_if_exists)
+                timestamps.putIfAbsent(sender, getTimestamp());
+            else
+                timestamps.put(sender, getTimestamp());
+        }
         if(log_msg && log.isTraceEnabled())
             log.trace("%s: received heartbeat from %s", local_addr, sender);
     }

@@ -63,7 +63,7 @@ public abstract class FailureDetection extends Protocol {
     protected abstract long               getTimeoutCheckInterval();
     protected abstract String             getTimeoutCheckerInfo();
     protected abstract void               retainKeys(List<Address> mbrs);
-    protected abstract void               update(Address sender, boolean log_msg);
+    protected abstract void               update(Address sender, boolean log_msg, boolean skip_if_exists);
     protected abstract <T> boolean        needsToBeSuspected(Address mbr, T value);
 
 
@@ -157,7 +157,7 @@ public abstract class FailureDetection extends Protocol {
             case Event.UNSUSPECT:
                 Address mbr=evt.getArg();
                 unsuspect(mbr);
-                update(mbr, false);
+                update(mbr, false, false);
                 break;
         }
         return down_prot.down(evt);
@@ -168,13 +168,13 @@ public abstract class FailureDetection extends Protocol {
         Address sender=msg.getSrc();
         Header hdr=msg.getHeader(this.id);
         if(hdr != null) {
-            update(sender, true); // updates the heartbeat entry for 'sender'
+            update(sender, true, false); // updates the heartbeat entry for 'sender'
             num_heartbeats_received++;
             unsuspect(sender);
             return null; // consume heartbeat message, do not pass to the layer above
         }
         else if(msg_counts_as_heartbeat) {
-            update(sender, false); // update when data is received too ? maybe a bit costly
+            update(sender, false, false); // update when data is received too ? maybe a bit costly
             if(has_suspected_mbrs)
                 unsuspect(sender);
         }
@@ -184,66 +184,14 @@ public abstract class FailureDetection extends Protocol {
     public void up(MessageBatch batch) {
         int matched_msgs=batch.replaceIf(HAS_HEADER, null, true);
         if(matched_msgs > 0 || msg_counts_as_heartbeat) {
-            update(batch.sender(), matched_msgs > 0);
-            num_heartbeats_received++;
+            update(batch.sender(), matched_msgs > 0, false);
+            if(matched_msgs > 0)
+                num_heartbeats_received+=matched_msgs;
             if(has_suspected_mbrs)
                 unsuspect(batch.sender());
         }
         if(!batch.isEmpty())
             up_prot.up(batch);
-    }
-
-
-    protected void startHeartbeatSender() {
-        lock.lock();
-        try {
-            if(!isHeartbeatSenderRunning()) {
-                heartbeat_sender=timer.scheduleWithFixedDelay(new HeartbeatSender(), 0, interval, TimeUnit.MILLISECONDS,
-                                                              getTransport() instanceof TCP);
-            }
-        }
-        finally {
-            lock.unlock();
-        }
-    }
-
-    protected void stopHeartbeatSender() {
-        lock.lock();
-        try {
-            if(heartbeat_sender != null) {
-                heartbeat_sender.cancel(true);
-                heartbeat_sender=null;
-            }
-        }
-        finally {
-            lock.unlock();
-        }
-    }
-
-    protected void startTimeoutChecker() {
-        lock.lock();
-        try {
-            if(!isTimeoutCheckerRunning()) {
-                timeout_checker=timer.scheduleWithFixedDelay(createTimeoutChecker(), getTimeoutCheckInterval(),
-                                                             getTimeoutCheckInterval(), TimeUnit.MILLISECONDS, false);
-            }
-        }
-        finally {
-            lock.unlock();
-        }
-    }
-
-    protected void stopTimeoutChecker() {
-        lock.lock();
-        try {
-            if(timeout_checker != null) {
-                timeout_checker.cancel(true);
-                timeout_checker=null;
-            }
-        }
-        finally {
-            lock.unlock();
-        }
     }
 
     protected void handleViewChange(View v) {
@@ -255,7 +203,7 @@ public abstract class FailureDetection extends Protocol {
                 has_suspected_mbrs=!suspected_mbrs.isEmpty();
             retainKeys(mbrs);
         }
-        mbrs.forEach(m -> update(m, false));
+        mbrs.forEach(m -> update(m, false, true));
         if(mbrs.size() > 1) {
             startHeartbeatSender();
             startTimeoutChecker();
@@ -313,6 +261,61 @@ public abstract class FailureDetection extends Protocol {
 
 
 
+    protected void startHeartbeatSender() {
+        lock.lock();
+        try {
+            if(!isHeartbeatSenderRunning()) {
+                heartbeat_sender=timer.scheduleWithFixedDelay(new HeartbeatSender(), 0, interval, TimeUnit.MILLISECONDS,
+                                                              getTransport() instanceof TCP);
+            }
+        }
+        finally {
+            lock.unlock();
+        }
+    }
+
+    protected void stopHeartbeatSender() {
+        lock.lock();
+        try {
+            if(heartbeat_sender != null) {
+                heartbeat_sender.cancel(true);
+                heartbeat_sender=null;
+            }
+        }
+        finally {
+            lock.unlock();
+        }
+    }
+
+    protected void startTimeoutChecker() {
+        lock.lock();
+        try {
+            if(!isTimeoutCheckerRunning()) {
+                timeout_checker=timer.scheduleWithFixedDelay(createTimeoutChecker(), getTimeoutCheckInterval(),
+                                                             getTimeoutCheckInterval(), TimeUnit.MILLISECONDS, false);
+            }
+        }
+        finally {
+            lock.unlock();
+        }
+    }
+
+    protected void stopTimeoutChecker() {
+        lock.lock();
+        try {
+            if(timeout_checker != null) {
+                timeout_checker.cancel(true);
+                timeout_checker=null;
+            }
+        }
+        finally {
+            lock.unlock();
+        }
+    }
+
+
+
+
 
     public static class HeartbeatHeader extends Header {
         public HeartbeatHeader() {}
@@ -327,7 +330,8 @@ public abstract class FailureDetection extends Protocol {
     /** Class which periodically multicasts a HEARTBEAT message to the cluster */
     class HeartbeatSender implements Runnable {
         public void run() {
-            Message heartbeat=new EmptyMessage().setFlag(Message.Flag.INTERNAL).putHeader(id, new HeartbeatHeader());
+            Message heartbeat=new EmptyMessage().setFlag(Message.Flag.INTERNAL).setFlag(Message.TransientFlag.DONT_LOOPBACK)
+              .putHeader(id, new HeartbeatHeader());
             down_prot.down(heartbeat);
             num_heartbeats_sent++;
             log.trace("%s: sent heartbeat", local_addr);

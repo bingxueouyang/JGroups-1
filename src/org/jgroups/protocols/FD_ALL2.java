@@ -36,11 +36,13 @@ public class FD_ALL2 extends FailureDetection {
         return _printTimestamps();
     }
 
-    @Override protected void update(Address sender, boolean log_msg) {
+    @Override protected void update(Address sender, boolean log_msg, boolean skip_if_exists) {
         if(sender != null && !sender.equals(local_addr)) {
             AtomicBoolean heartbeat_received=timestamps.get(sender);
-            if(heartbeat_received != null)
-                heartbeat_received.compareAndSet(false, true);
+            if(heartbeat_received != null) {
+                if(!skip_if_exists)
+                    heartbeat_received.compareAndSet(false, true);
+            }
             else
                 timestamps.putIfAbsent(sender, new AtomicBoolean(true));
         }
